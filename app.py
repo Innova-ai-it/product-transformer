@@ -1,8 +1,12 @@
 import os
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from transformer import transform_product
 
 app = Flask(__name__)
+
+# Abilita CORS per tutte le route
+CORS(app)
 
 @app.route("/transform", methods=["POST"])
 def transform():
