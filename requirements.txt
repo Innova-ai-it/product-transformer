@@ -1,0 +1,5 @@
+flask
+pandas
+fastapi
+uvicorn
+python-multipart
