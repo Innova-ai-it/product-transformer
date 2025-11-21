@@ -1,6 +1,4 @@
 flask
 flask-cors
 pandas
-fastapi
-uvicorn
-python-multipart
+werkzeug
