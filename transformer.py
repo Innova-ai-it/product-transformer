@@ -2,259 +2,348 @@ import pandas as pd
 import re
 import unicodedata
 from itertools import product
-from typing import List
+from typing import Dict, List, Any
 
-def slugify(value: str) -> str:
-    """Crea un handle compatibile (slug) per Shopify."""
-    if pd.isna(value):
+def clean_html(text):
+    """Rimuove tag HTML e pulisce il testo"""
+    if pd.isna(text) or text == "":
         return ""
-    value = str(value)
-    value = unicodedata.normalize("NFKD", value)
-    value = value.encode("ascii", "ignore").decode("ascii")
-    value = re.sub(r"[^\w\s-]", "", value).strip().lower()
-    value = re.sub(r"[-\s]+", "-", value)
-    return value
+    text = str(text)
+    # Rimuove tag HTML
+    text = re.sub(r'<[^>]+>', '', text)
+    # Decodifica HTML entities
+    text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+    text = text.replace('&#039;', "'").replace('&quot;', '"')
+    text = text.replace('\n', ' ').replace('\r', '')
+    return text.strip()
 
-def split_images(cell) -> List[str]:
-    """Splitta stringa immagini separate da virgola/pipe/space."""
-    if pd.isna(cell):
+def generate_handle(title):
+    """Genera un handle Shopify valido dal titolo"""
+    if pd.isna(title) or title == "":
+        return ""
+    handle = str(title).lower()
+    # Rimuove caratteri speciali
+    handle = re.sub(r'[^a-z0-9\s-]', '', handle)
+    # Sostituisce spazi con trattini
+    handle = re.sub(r'\s+', '-', handle)
+    # Rimuove trattini multipli
+    handle = re.sub(r'-+', '-', handle)
+    # Rimuove trattini iniziali/finali
+    handle = handle.strip('-')
+    return handle
+
+def parse_images(image_string):
+    """Converte stringa immagini in lista"""
+    if pd.isna(image_string) or image_string == "":
         return []
-    if isinstance(cell, list):
-        return cell
-    s = str(cell)
-    # common separators: comma, pipe, semicolon
-    parts = re.split(r"\s*,\s*|\s*\|\s*|\s*;\s*", s.strip())
-    parts = [p for p in parts if p]
-    return parts
+    images = str(image_string).split(',')
+    return [img.strip() for img in images if img.strip()]
 
-def parse_attribute_values(val: str) -> List[str]:
-    """Da 'M | L | XL' o 'M,L,XL' restituisce lista."""
-    if pd.isna(val):
-        return []
-    s = str(val).strip()
-    parts = re.split(r"\s*\|\s*|\s*,\s*|\s*;\s*", s)
-    parts = [p.strip() for p in parts if p.strip()]
-    return parts
+def get_variant_options(row):
+    """Estrae le opzioni varianti da attributi"""
+    options = {}
+    
+    # Cerca attributi fino a 3 (puoi estendere)
+    for i in range(1, 4):
+        attr_name_col = f"Nome dell'attributo {i}"
+        attr_value_col = f"Valore dell'attributo {i}"
+        
+        if attr_name_col in row and not pd.isna(row[attr_name_col]):
+            name = str(row[attr_name_col]).strip()
+            value = str(row[attr_value_col]).strip() if attr_value_col in row else ""
+            
+            if name and value:
+                options[f"Option{i} Name"] = name
+                options[f"Option{i} Value"] = value
+    
+    return options
 
-def ensure_cols(df: pd.DataFrame, cols: List[str]):
-    for c in cols:
-        if c not in df.columns:
-            df[c] = ""
-
-def convert_woocommerce_df_to_shopify(df: pd.DataFrame) -> pd.DataFrame:
+def transform_woocommerce_to_shopify(df):
     """
-    Converte un DataFrame esportato da WooCommerce in un DataFrame con schema compatibile Shopify CSV.
-    Strategie:
-      - Raggruppa per product ID (colonna 'ID' o 'id' o 'post_id')
-      - Se ci sono righe tipo 'variation', considerale singole varianti
-      - Altrimenti genera varianti combinando attributi presenti (Attr1, Attr2, ...)
-      - Crea righe extra per immagini aggiuntive (solo Handle + Image Src)
+    Trasforma un DataFrame WooCommerce in formato Shopify
+    
+    Input: DataFrame con struttura WooCommerce
+    Output: DataFrame con struttura Shopify
     """
-
-    # Normalizzazioni colonne comuni
-    possible_id_cols = ['ID', 'Id', 'id', 'post_id']
-    id_col = next((c for c in possible_id_cols if c in df.columns), None)
-    if id_col is None:
-        # se non c'è id, creiamo uno
-        df = df.reset_index().rename(columns={'index': 'ID'})
-        id_col = 'ID'
-
-    # assicurati colonne usate
-    ensure_cols(df, [
-        'Type', 'type', 'post_type', 'Nome', 'Nome prodotto', 'Name',
-        'SKU', 'sku', 'Descrizione', 'Short description',
-        'Prezzo', 'Prezzo scontato', 'Regular price', 'Sale price',
-        'Images', 'Image', 'Gallery', 'Immagini',
-        'Published', 'Status',
-        'Stock', 'Stock quantity', 'Quantity'
-    ])
-
-    # Colonne mappate più probabili (scegli il primo esistente)
-    title_col = next((c for c in ['Nome', 'Name', 'post_title'] if c in df.columns), id_col)
-    sku_col = next((c for c in ['SKU', 'sku', 'sku_'] if c in df.columns), None)
-    price_col = next((c for c in ['Prezzo', 'Price', 'Regular price', 'regular_price'] if c in df.columns), None)
-    sale_price_col = next((c for c in ['Prezzo scontato', 'Sale price', 'sale_price'] if c in df.columns), None)
-    stock_col = next((c for c in ['Stock', 'Stock quantity', 'Quantity', 'quantity'] if c in df.columns), None)
-    images_col = next((c for c in ['Immagini', 'Images', 'Gallery', 'Image'] if c in df.columns), None)
-    desc_col = next((c for c in ['Descrizione', 'Description', 'post_content'] if c in df.columns), None)
-    tags_col = next((c for c in ['Tags', 'tags', 'Categorie', 'Categories'] if c in df.columns), None)
-    vendor_col = next((c for c in ['Marca', 'Brand', 'vendor', 'Vendor'] if c in df.columns), None)
-
-    # Trova colonne attributo (es. "Attribute 1 name" o "Nome dell'attributo 1")
-    attr_name_cols = [c for c in df.columns if re.search(r'attributo|attribute|attribute.+name|nome.*attributo', c, re.IGNORECASE)]
-    attr_value_cols = [c for c in df.columns if re.search(r'valore.*attributo|attribute.+value', c, re.IGNORECASE)]
-    # fallback: cerca colonne come "Attribute 1" o "Attributo 1"
-    for i in range(1,6):
-        ncol = f'Attribute {i}'
-        if ncol in df.columns and ncol not in attr_value_cols:
-            attr_value_cols.append(ncol)
-        ncol2 = f'Attributo {i}'
-        if ncol2 in df.columns and ncol2 not in attr_value_cols:
-            attr_value_cols.append(ncol2)
-
-    # Prepara lista di output rows (dizionari)
-    out_rows = []
-
-    # Raggruppa per prodotto principale
-    grouped = df.groupby(id_col, dropna=False, sort=False)
-
-    for pid, group in grouped:
-        # Prendi la prima riga come "master" del prodotto
-        master = group.iloc[0]
-
-        p_title = master.get(title_col, "")
-        p_handle = slugify(p_title)
-        p_desc = master.get(desc_col, "") if desc_col else ""
-        p_vendor = master.get(vendor_col, "") if vendor_col else ""
-        p_tags = master.get(tags_col, "") if tags_col else ""
-        p_images = split_images(master.get(images_col, "")) if images_col else []
-        p_price = master.get(price_col, "") if price_col else ""
-        p_sale = master.get(sale_price_col, "") if sale_price_col else ""
-        p_sku = master.get(sku_col, "") if sku_col else ""
-        p_stock = master.get(stock_col, "") if stock_col else ""
-
-        # check se ci sono righe di tipo 'variation' nel group
-        variation_rows = group[group.apply(lambda r: str(r.get('Type','')).lower() == 'variation' or str(r.get('type','')).lower() == 'variation', axis=1)]
-        has_variations = not variation_rows.empty
-
-        # Se ci sono righe variation: usale come varianti
-        variants = []
-        if has_variations:
-            for _, vr in variation_rows.iterrows():
-                v_sku = vr.get(sku_col, "") if sku_col else ""
-                v_price = vr.get(price_col, p_price)
-                v_sale = vr.get(sale_price_col, p_sale)
-                v_stock = vr.get(stock_col, p_stock)
-                v_images = split_images(vr.get(images_col, "")) or p_images
-                # attempt to find option values in variation row (common columns)
-                option1 = vr.get('Attribute 1 value') if 'Attribute 1 value' in vr.index else None
-                # generic strategy: collect any attribute columns present
-                option_vals = []
-                for c in vr.index:
-                    if re.search(r'attribute.*value|valore.*attributo|attributo.*valore', str(c), re.IGNORECASE):
-                        option_vals.append(str(vr.get(c)))
-                variants.append({
-                    'sku': v_sku,
-                    'price': v_price,
-                    'compare_at_price': v_sale,
-                    'stock': v_stock,
-                    'images': v_images,
-                    'options': option_vals
-                })
+    
+    shopify_products = []
+    
+    # Raggruppa prodotti variabili con le loro varianti
+    # Prodotti semplici hanno Tipo = "simple"
+    # Prodotti variabili hanno Tipo = "variable" (padre) e varianti con Genitore != NaN
+    
+    # Prima passiamo sui prodotti padre (simple o variable)
+    parent_products = df[df['Genitore'].isna() | (df['Genitore'] == '')]
+    
+    for idx, row in parent_products.iterrows():
+        product_id = row['ID']
+        product_type = row['Tipo']
+        
+        # Dati base del prodotto
+        title = str(row['Nome']) if not pd.isna(row['Nome']) else ""
+        handle = generate_handle(title)
+        body_html = str(row['Descrizione']) if not pd.isna(row['Descrizione']) else ""
+        vendor = "Default"  # Puoi personalizzare
+        
+        # Categorie → Collections
+        categories = str(row['Categorie']) if not pd.isna(row['Categorie']) else ""
+        collections = categories  # Shopify usa le collections
+        
+        # Product Type (prima categoria)
+        product_type_value = categories.split(',')[0].strip() if categories else ""
+        
+        # Tags
+        tags = str(row['Tag']) if not pd.isna(row['Tag']) else ""
+        
+        # Immagini
+        images = parse_images(row['Immagine'])
+        main_image = images[0] if images else ""
+        
+        # Prezzo
+        regular_price = str(row['Prezzo di listino']) if not pd.isna(row['Prezzo di listino']) else "0"
+        sale_price = str(row['Prezzo in offerta']) if not pd.isna(row['Prezzo in offerta']) else ""
+        
+        # Se c'è sale price, quello è il prezzo e regular diventa compare-at
+        if sale_price:
+            variant_price = sale_price
+            compare_at_price = regular_price
         else:
-            # No explicit variation rows -> prova a leggere attributi della master row
-            # Cerca colonne che definiscono attributo name/value
-            attr_names = []
-            attr_values = []
-            # Strategy: find columns like "Attribute 1 name" and "Attribute 1 value" or "Nome dell'attributo 1" / "Valore dell'attributo 1"
-            for i in range(1,6):
-                name_candidates = [f'Attribute {i} name', f'Nome dell\'attributo {i}', f'Nome attributo {i}']
-                value_candidates = [f'Attribute {i} value', f'Valore dell\'attributo {i}', f'Attribute {i}', f'Attributo {i}']
-                found_name = None
-                found_value = None
-                for nc in name_candidates:
-                    if nc in master.index and str(master.get(nc)).strip():
-                        found_name = str(master.get(nc)).strip()
-                        break
-                for vc in value_candidates:
-                    if vc in master.index and str(master.get(vc)).strip():
-                        found_value = str(master.get(vc)).strip()
-                        break
-                if found_name and found_value:
-                    attr_names.append(found_name)
-                    attr_values.append(parse_attribute_values(found_value))
-
-            if attr_values:
-                # crea tutte le combinazioni (product)
-                combos = list(product(*attr_values))
-                for combo in combos:
-                    opt_list = list(combo)
-                    variants.append({
-                        'sku': "",  # SKU in genere a livello variante può non esserci nel csv master
-                        'price': p_price,
-                        'compare_at_price': p_sale,
-                        'stock': p_stock,
-                        'images': p_images,
-                        'options': opt_list
-                    })
-            else:
-                # Prodotto semplice -> una sola variante
-                variants.append({
-                    'sku': p_sku or "",
-                    'price': p_price,
-                    'compare_at_price': p_sale,
-                    'stock': p_stock,
-                    'images': p_images,
-                    'options': []
-                })
-
-        # Determina option names (Option1/2/3) basandoci su attr_names trovati (se esistono), altrimenti generici
-        option_names = []
-        if attr_names:
-            option_names = attr_names[:3]
+            variant_price = regular_price
+            compare_at_price = ""
+        
+        # Stock
+        stock_status = str(row['In stock?']) if not pd.isna(row['In stock?']) else "0"
+        stock_quantity = str(row['Quantità in magazzino']) if not pd.isna(row['Quantità in magazzino']) else "0"
+        
+        # Inventory policy
+        inventory_policy = "deny"  # Non vendere se out of stock
+        if stock_status == "1" or int(stock_quantity) > 0:
+            inventory_tracker = "shopify"
         else:
-            # se abbiamo varianti con options content >0, proviamo a dedurre nomi generici
-            max_opts = max((len(v['options']) for v in variants), default=0)
-            for i in range(max_opts):
-                option_names.append(f"Option{i+1}")
-
-        # Costruzione righe Shopify
-        first_variant = True
-        for v in variants:
-            row = {
-                "Handle": p_handle,
-                "Title": p_title if first_variant else "",
-                "Body (HTML)": p_desc if first_variant else "",
-                "Vendor": p_vendor if first_variant else "",
-                "Tags": p_tags if first_variant else "",
-                "Option1 Name": option_names[0] if len(option_names) > 0 else "",
-                "Option1 Value": v['options'][0] if len(v['options']) > 0 else (p_title if not v['options'] else ""),
-                "Option2 Name": option_names[1] if len(option_names) > 1 else "",
-                "Option2 Value": v['options'][1] if len(v['options']) > 1 else "",
-                "Option3 Name": option_names[2] if len(option_names) > 2 else "",
-                "Option3 Value": v['options'][2] if len(v['options']) > 2 else "",
-                "Variant SKU": v.get('sku', ""),
-                "Variant Price": v.get('price', ""),
-                "Variant Compare At Price": v.get('compare_at_price', ""),
-                "Variant Inventory Qty": v.get('stock', ""),
-                "Image Src": v['images'][0] if v['images'] else (p_images[0] if p_images else ""),
-                "Image Position": 1 if v['images'] else (1 if p_images else ""),
-                "Published": master.get('Published', master.get('Status', '')) if first_variant else ""
+            inventory_tracker = ""
+            stock_quantity = "0"
+        
+        # SKU
+        sku = str(row['SKU']) if not pd.isna(row['SKU']) else ""
+        
+        if product_type == "simple" or product_type == "simple, virtual":
+            # Prodotto semplice - una sola riga
+            shopify_row = {
+                "Handle": handle,
+                "Title": title,
+                "Body (HTML)": body_html,
+                "Vendor": vendor,
+                "Product Category": collections,
+                "Type": product_type_value,
+                "Tags": tags,
+                "Published": "TRUE",
+                "Option1 Name": "Title",
+                "Option1 Value": "Default Title",
+                "Option2 Name": "",
+                "Option2 Value": "",
+                "Option3 Name": "",
+                "Option3 Value": "",
+                "Variant SKU": sku,
+                "Variant Grams": "",
+                "Variant Inventory Tracker": inventory_tracker,
+                "Variant Inventory Qty": stock_quantity,
+                "Variant Inventory Policy": inventory_policy,
+                "Variant Fulfillment Service": "manual",
+                "Variant Price": variant_price,
+                "Variant Compare At Price": compare_at_price,
+                "Variant Requires Shipping": "TRUE",
+                "Variant Taxable": "TRUE",
+                "Variant Barcode": "",
+                "Image Src": main_image,
+                "Image Position": "1",
+                "Image Alt Text": "",
+                "Gift Card": "FALSE",
+                "SEO Title": "",
+                "SEO Description": "",
+                "Google Shopping / Google Product Category": "",
+                "Google Shopping / Gender": "",
+                "Google Shopping / Age Group": "",
+                "Google Shopping / MPN": "",
+                "Google Shopping / AdWords Grouping": "",
+                "Google Shopping / AdWords Labels": "",
+                "Google Shopping / Condition": "",
+                "Google Shopping / Custom Product": "",
+                "Google Shopping / Custom Label 0": "",
+                "Google Shopping / Custom Label 1": "",
+                "Google Shopping / Custom Label 2": "",
+                "Google Shopping / Custom Label 3": "",
+                "Google Shopping / Custom Label 4": "",
+                "Variant Image": main_image,
+                "Variant Weight Unit": "kg",
+                "Variant Tax Code": "",
+                "Cost per item": "",
+                "Status": "active"
             }
-            out_rows.append(row)
-            first_variant = False
-
-        # Aggiungi righe immagine extra (solo Handle e Image Src) per immagini aggiuntive oltre la prima
-        if p_images and len(p_images) > 1:
-            for pos, img in enumerate(p_images[1:], start=2):
-                img_row = {
-                    "Handle": p_handle,
-                    "Title": "", "Body (HTML)": "", "Vendor": "", "Tags": "",
-                    "Option1 Name": "", "Option1 Value": "",
-                    "Option2 Name": "", "Option2 Value": "",
-                    "Option3 Name": "", "Option3 Value": "",
-                    "Variant SKU": "", "Variant Price": "", "Variant Compare At Price": "",
-                    "Variant Inventory Qty": "", "Image Src": img, "Image Position": pos,
-                    "Published": ""
+            
+            shopify_products.append(shopify_row)
+            
+            # Aggiungi altre immagini come righe separate
+            for i, img_url in enumerate(images[1:], start=2):
+                img_row = shopify_row.copy()
+                img_row["Title"] = ""
+                img_row["Body (HTML)"] = ""
+                img_row["Vendor"] = ""
+                img_row["Product Category"] = ""
+                img_row["Type"] = ""
+                img_row["Tags"] = ""
+                img_row["Option1 Name"] = ""
+                img_row["Option1 Value"] = ""
+                img_row["Variant SKU"] = ""
+                img_row["Variant Price"] = ""
+                img_row["Image Src"] = img_url
+                img_row["Image Position"] = str(i)
+                shopify_products.append(img_row)
+        
+        elif product_type == "variable":
+            # Prodotto variabile - cerca tutte le varianti
+            variants = df[df['Genitore'] == product_id]
+            
+            if len(variants) == 0:
+                # Se non ha varianti, trattalo come semplice
+                continue
+            
+            first_variant = True
+            image_position = 1
+            
+            for var_idx, var_row in variants.iterrows():
+                # Estrai opzioni variante
+                variant_options = get_variant_options(var_row)
+                
+                # SKU variante
+                var_sku = str(var_row['SKU']) if not pd.isna(var_row['SKU']) else ""
+                
+                # Prezzo variante
+                var_regular_price = str(var_row['Prezzo di listino']) if not pd.isna(var_row['Prezzo di listino']) else "0"
+                var_sale_price = str(var_row['Prezzo in offerta']) if not pd.isna(var_row['Prezzo in offerta']) else ""
+                
+                if var_sale_price:
+                    var_variant_price = var_sale_price
+                    var_compare_at = var_regular_price
+                else:
+                    var_variant_price = var_regular_price
+                    var_compare_at = ""
+                
+                # Stock variante
+                var_stock_status = str(var_row['In stock?']) if not pd.isna(var_row['In stock?']) else "0"
+                var_stock_qty = str(var_row['Quantità in magazzino']) if not pd.isna(var_row['Quantità in magazzino']) else "0"
+                
+                if var_stock_status == "1" or int(var_stock_qty) > 0:
+                    var_inventory_tracker = "shopify"
+                else:
+                    var_inventory_tracker = ""
+                    var_stock_qty = "0"
+                
+                # Immagine variante
+                var_images = parse_images(var_row['Immagine'])
+                var_main_image = var_images[0] if var_images else main_image
+                
+                shopify_row = {
+                    "Handle": handle,
+                    "Title": title if first_variant else "",
+                    "Body (HTML)": body_html if first_variant else "",
+                    "Vendor": vendor if first_variant else "",
+                    "Product Category": collections if first_variant else "",
+                    "Type": product_type_value if first_variant else "",
+                    "Tags": tags if first_variant else "",
+                    "Published": "TRUE" if first_variant else "",
+                    "Option1 Name": variant_options.get("Option1 Name", ""),
+                    "Option1 Value": variant_options.get("Option1 Value", ""),
+                    "Option2 Name": variant_options.get("Option2 Name", ""),
+                    "Option2 Value": variant_options.get("Option2 Value", ""),
+                    "Option3 Name": variant_options.get("Option3 Name", ""),
+                    "Option3 Value": variant_options.get("Option3 Value", ""),
+                    "Variant SKU": var_sku,
+                    "Variant Grams": "",
+                    "Variant Inventory Tracker": var_inventory_tracker,
+                    "Variant Inventory Qty": var_stock_qty,
+                    "Variant Inventory Policy": inventory_policy,
+                    "Variant Fulfillment Service": "manual",
+                    "Variant Price": var_variant_price,
+                    "Variant Compare At Price": var_compare_at,
+                    "Variant Requires Shipping": "TRUE",
+                    "Variant Taxable": "TRUE",
+                    "Variant Barcode": "",
+                    "Image Src": main_image if first_variant else "",
+                    "Image Position": str(image_position) if first_variant else "",
+                    "Image Alt Text": "",
+                    "Gift Card": "FALSE",
+                    "SEO Title": "",
+                    "SEO Description": "",
+                    "Google Shopping / Google Product Category": "",
+                    "Google Shopping / Gender": "",
+                    "Google Shopping / Age Group": "",
+                    "Google Shopping / MPN": "",
+                    "Google Shopping / AdWords Grouping": "",
+                    "Google Shopping / AdWords Labels": "",
+                    "Google Shopping / Condition": "",
+                    "Google Shopping / Custom Product": "",
+                    "Google Shopping / Custom Label 0": "",
+                    "Google Shopping / Custom Label 1": "",
+                    "Google Shopping / Custom Label 2": "",
+                    "Google Shopping / Custom Label 3": "",
+                    "Google Shopping / Custom Label 4": "",
+                    "Variant Image": var_main_image,
+                    "Variant Weight Unit": "kg",
+                    "Variant Tax Code": "",
+                    "Cost per item": "",
+                    "Status": "active"
                 }
-                out_rows.append(img_row)
+                
+                shopify_products.append(shopify_row)
+                first_variant = False
+                image_position += 1
+                
+                # Aggiungi immagini aggiuntive della variante
+                for img_url in var_images[1:]:
+                    img_row = shopify_row.copy()
+                    img_row["Title"] = ""
+                    img_row["Image Src"] = img_url
+                    img_row["Image Position"] = str(image_position)
+                    img_row["Variant Image"] = ""
+                    shopify_products.append(img_row)
+                    image_position += 1
+    
+    return pd.DataFrame(shopify_products)
 
-    # Costruisci DataFrame finale con colonne nell'ordine richiesto da Shopify
-    columns = [
-        "Handle", "Title", "Body (HTML)", "Vendor", "Tags",
-        "Option1 Name", "Option1 Value", "Option2 Name", "Option2 Value", "Option3 Name", "Option3 Value",
-        "Variant SKU", "Variant Price", "Variant Compare At Price", "Variant Inventory Qty",
-        "Image Src", "Image Position", "Published"
-    ]
-    out_df = pd.DataFrame(out_rows, columns=columns)
-    # Pulizia finale: sostituisci NaN con stringa vuota
-    out_df = out_df.fillna("")
-    return out_df
-
-
-def convert_woocommerce_csv_path_to_shopify_csv(input_csv_path: str, output_csv_path: str):
-    df = pd.read_csv(input_csv_path, dtype=str, keep_default_na=False)
-    shopify_df = convert_woocommerce_df_to_shopify(df)
-    # Shopify vuole UTF-8 senza BOM
-    shopify_df.to_csv(output_csv_path, index=False, encoding='utf-8')
-    return output_csv_path
+def transform_product(source_platform, product):
+    """
+    Funzione principale chiamata da app.py
+    
+    Args:
+        source_platform: "woocommerce", "wix", o "prestashop"
+        product: dict o DataFrame con i dati del prodotto
+    
+    Returns:
+        dict o DataFrame trasformato per Shopify
+    """
+    
+    if source_platform == "woocommerce":
+        # Se product è un dict, convertilo in DataFrame
+        if isinstance(product, dict):
+            df = pd.DataFrame([product])
+        elif isinstance(product, pd.DataFrame):
+            df = product
+        else:
+            return {"error": "Formato prodotto non valido"}
+        
+        # Trasforma
+        shopify_df = transform_woocommerce_to_shopify(df)
+        
+        # Ritorna come lista di dict
+        return shopify_df.to_dict(orient='records')
+    
+    elif source_platform == "wix":
+        # TODO: Implementare trasformazione Wix
+        return {"error": "Wix non ancora implementato"}
+    
+    elif source_platform == "prestashop":
+        # TODO: Implementare trasformazione Prestashop
+        return {"error": "Prestashop non ancora implementato"}
+    
+    else:
+        return {"error": f"Piattaforma {source_platform} non supportata"}
