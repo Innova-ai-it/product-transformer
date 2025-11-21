@@ -347,3 +347,17 @@ def transform_product(source_platform, product):
     
     else:
         return {"error": f"Piattaforma {source_platform} non supportata"}
+
+def convert_woocommerce_csv_path_to_shopify_csv(input_path: str, output_path: str, **read_csv_kwargs):
+    """
+    Legge un CSV WooCommerce da `input_path`, lo trasforma in formato Shopify
+    e scrive il CSV risultante in `output_path`.
+    """
+    # Leggi CSV (passa kwargs se serve encoding, sep, etc.)
+    df = pd.read_csv(input_path, **read_csv_kwargs)
+
+    # Trasforma con la funzione esistente
+    shopify_df = transform_woocommerce_to_shopify(df)
+
+    # Salva il CSV pronto per Shopify
+    shopify_df.to_csv(output_path, index=False, encoding='utf-8')
